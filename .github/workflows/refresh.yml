@@ -1,0 +1,89 @@
+# Copy to .github/workflows/refresh.yml in the PUBLIC data repository
+# (see docs/SCALING.md). Public repositories get GitHub Actions minutes free.
+name: Refresh shared data
+
+on:
+  schedule:
+    - cron: "17 */2 * * *"   # CelesTrak publishes new elements every 2 hours
+    - cron: "40 5 * * *"     # NASA picture of the day
+    - cron: "0 3 1 * *"      # JPL position tables, monthly
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Jobs to run (celestrak apod ephemeris)"
+        default: "celestrak apod"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch the current data branch
+        run: |
+          git fetch origin data || true
+          if git rev-parse --verify origin/data >/dev/null 2>&1; then
+            git worktree add out origin/data
+          else
+            mkdir -p out
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Pick jobs
+        id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "17 */2 * * *") echo "jobs=celestrak" >> "$GITHUB_OUTPUT" ;;
+            "40 5 * * *")   echo "jobs=apod" >> "$GITHUB_OUTPUT" ;;
+            "0 3 1 * *")    echo "jobs=ephemeris" >> "$GITHUB_OUTPUT" ;;
+            *)              echo "jobs=${{ github.event.inputs.jobs }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Refresh
+        env:
+          NASA_API_KEY: ${{ secrets.NASA_API_KEY }}
+          OUT_DIR: out
+        run: |
+          pip install numpy
+          python data_pipeline/refresh.py ${{ steps.pick.outputs.jobs }}
+
+      # One commit, no history: the branch stays small however often it updates.
+      - name: Publish
+        run: |
+          cd out
+          rm -rf .git 2>/dev/null || true
+          git init -q -b data
+          git config user.name "planetarium-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "data $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+
+      # GitHub pauses schedules in public repos after 60 days without commits;
+      # a monthly timestamp on main keeps them running.
+      - name: Keep the schedule alive
+        if: github.event.schedule == '0 3 1 * *'
+        run: |
+          date -u +%Y-%m-%dT%H:%MZ > .last-monthly-run
+          git config user.name "planetarium-data-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add .last-monthly-run
+          git commit -q -m "monthly run $(date -u +%Y-%m-%d)"
+          git push origin HEAD:main
+
+      - name: Purge the jsDelivr cache
+        run: |
+          for f in $(cd out && git ls-files); do
+            curl -s -o /dev/null "https://purge.jsdelivr.net/gh/${{ github.repository }}@data/$f" || true
+          done
