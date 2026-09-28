@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -25,9 +26,19 @@ UA = {"User-Agent": "planetarium-data-refresh (GitHub Actions; one shared downlo
 
 
 def get(url, timeout=120):
+    """GET with retries for busy servers (5xx, timeouts); 4xx is final."""
     req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return r.read()
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or attempt == 3:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 3:
+                raise
+        time.sleep(20 * (attempt + 1))
 
 
 def write(rel, data: bytes):
